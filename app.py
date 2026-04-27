@@ -5,7 +5,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import streamlit as st
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 try:
     from streamlit_sortables import sort_items
 except Exception:
@@ -287,6 +287,27 @@ def image_bytes_from_item(item: dict) -> bytes:
     return base64.b64decode(item["image_b64"])
 
 
+def build_fitted_card(item: dict, card_size: tuple[int, int] = CARD_SIZE) -> Image.Image:
+    """
+    Keep original aspect ratio for both landscape and portrait images,
+    then center the image on a fixed-size card background.
+    """
+    source = Image.open(io.BytesIO(image_bytes_from_item(item))).convert("RGB")
+    fitted = ImageOps.contain(source, card_size, method=Image.Resampling.LANCZOS)
+    card = Image.new("RGB", card_size, color=(248, 249, 250))
+    offset_x = (card_size[0] - fitted.width) // 2
+    offset_y = (card_size[1] - fitted.height) // 2
+    card.paste(fitted, (offset_x, offset_y))
+    return card
+
+
+def card_preview_bytes(item: dict, card_size: tuple[int, int] = CARD_SIZE) -> bytes:
+    card = build_fitted_card(item, card_size=card_size)
+    out = io.BytesIO()
+    card.save(out, format="PNG")
+    return out.getvalue()
+
+
 def safe_text(value: str) -> str:
     return str(value or "").strip()
 
@@ -339,12 +360,7 @@ def render_board_png(board: dict) -> bytes:
             if not item:
                 continue
             try:
-                img = Image.open(io.BytesIO(image_bytes_from_item(item))).convert("RGB")
-                img.thumbnail(CARD_SIZE)
-                tile = Image.new("RGB", CARD_SIZE, color=(248, 249, 250))
-                offset_x = (CARD_SIZE[0] - img.width) // 2
-                offset_y = (CARD_SIZE[1] - img.height) // 2
-                tile.paste(img, (offset_x, offset_y))
+                tile = build_fitted_card(item, card_size=CARD_SIZE)
                 canvas.paste(tile, (x, y + 10))
                 draw.rectangle((x, y + 10, x + CARD_SIZE[0], y + 10 + CARD_SIZE[1]), outline=(200, 200, 200))
                 draw.text((x + 4, y + CARD_SIZE[1] - 4), safe_text(item["name"])[:12], fill=(50, 50, 50), font=small_font)
@@ -498,7 +514,7 @@ else:
     cols = st.columns(4)
     for idx, item in enumerate(filtered_items):
         with cols[idx % 4]:
-            st.image(image_bytes_from_item(item), caption=item["name"], use_container_width=True)
+            st.image(card_preview_bytes(item), caption=item["name"], use_container_width=True)
             if st.button("刪除圖片", key=f"del_{item['id']}", use_container_width=True):
                 delete_item(board, item["id"])
                 st.rerun()
@@ -534,7 +550,7 @@ else:
             if not item:
                 continue
             with cols[idx % 5]:
-                st.image(image_bytes_from_item(item), caption=item["name"], use_container_width=True)
+                st.image(card_preview_bytes(item), caption=item["name"], use_container_width=True)
 
 autosave_if_needed()
 st.caption(f"目前自動儲存檔：`{get_active_save_path().resolve()}`")
