@@ -16,6 +16,8 @@ APP_TITLE = "夯到拉 Tier List"
 AUTOSAVE_PATH = Path("hangdaola_autosave.json")
 TIER_DEFAULTS = ["夯", "頂級", "人上人", "NPC", "拉"]
 CARD_SIZE = (140, 140)
+COMPRESS_LONG_EDGE_DEFAULT = 1280
+COMPRESS_JPEG_QUALITY_DEFAULT = 78
 
 
 def create_default_board(name: str = "我的榜單") -> dict:
@@ -287,6 +289,18 @@ def image_bytes_from_item(item: dict) -> bytes:
     return base64.b64decode(item["image_b64"])
 
 
+def compress_upload_image(
+    raw_bytes: bytes,
+    max_long_edge: int = COMPRESS_LONG_EDGE_DEFAULT,
+    jpeg_quality: int = COMPRESS_JPEG_QUALITY_DEFAULT,
+) -> tuple[bytes, str]:
+    image = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+    image.thumbnail((max_long_edge, max_long_edge), Image.Resampling.LANCZOS)
+    out = io.BytesIO()
+    image.save(out, format="JPEG", quality=jpeg_quality, optimize=True)
+    return out.getvalue(), "image/jpeg"
+
+
 def build_fitted_card(item: dict, card_size: tuple[int, int] = CARD_SIZE) -> Image.Image:
     """
     Keep original aspect ratio for both landscape and portrait images,
@@ -441,6 +455,28 @@ with st.sidebar:
                 st.warning("請先輸入共享檔路徑")
 
     st.divider()
+    st.subheader("效能設定")
+    st.session_state.upload_accelerate = st.checkbox(
+        "加速模式（上傳時壓縮）",
+        value=st.session_state.get("upload_accelerate", True),
+        help="壓縮後可明顯降低檔案大小，提升載入和拖放速度。",
+    )
+    st.session_state.compress_long_edge = st.slider(
+        "最大邊長（像素）",
+        min_value=640,
+        max_value=2048,
+        value=st.session_state.get("compress_long_edge", COMPRESS_LONG_EDGE_DEFAULT),
+        step=64,
+    )
+    st.session_state.compress_quality = st.slider(
+        "壓縮品質（JPEG）",
+        min_value=50,
+        max_value=95,
+        value=st.session_state.get("compress_quality", COMPRESS_JPEG_QUALITY_DEFAULT),
+        step=1,
+    )
+
+    st.divider()
     st.subheader("匯入 / 匯出")
     export_payload = json.dumps(st.session_state.data, ensure_ascii=False, indent=2).encode("utf-8")
     st.download_button(
@@ -490,23 +526,54 @@ uploaded_images = st.file_uploader(
 )
 if uploaded_images:
     existing_names = {item["name"] for item in board["items"]}
+    added_count = 0
+    skipped_count = 0
     for file in uploaded_images:
         if file.name in existing_names:
+            skipped_count += 1
             continue
+        original = file.getvalue()
+        if st.session_state.get("upload_accelerate", True):
+            compressed, mime = compress_upload_image(
+                original,
+                max_long_edge=int(st.session_state.get("compress_long_edge", COMPRESS_LONG_EDGE_DEFAULT)),
+                jpeg_quality=int(st.session_state.get("compress_quality", COMPRESS_JPEG_QUALITY_DEFAULT)),
+            )
+            store_bytes = compressed
+            store_mime = mime
+        else:
+            store_bytes = original
+            store_mime = file.type or "image/png"
+
         board["items"].append(
             {
                 "id": str(uuid4()),
                 "name": file.name,
-                "mime": file.type or "image/png",
-                "image_b64": base64.b64encode(file.getvalue()).decode("utf-8"),
+                "mime": store_mime,
+                "image_b64": base64.b64encode(store_bytes).decode("utf-8"),
             }
         )
-    st.success(f"已新增 {len(uploaded_images)} 張圖片")
+        added_count += 1
+    st.success(f"已新增 {added_count} 張圖片，略過重複 {skipped_count} 張。")
 
 search = st.text_input("搜尋圖片名稱", placeholder="輸入關鍵字")
 items = board["items"]
 items_by_id = item_map(board)
 filtered_items = [i for i in items if search.lower().strip() in i["name"].lower()]
+
+selected_delete_ids = st.multiselect(
+    "多選刪除圖片",
+    options=[item["id"] for item in filtered_items],
+    format_func=lambda item_id: items_by_id[item_id]["name"] if item_id in items_by_id else item_id,
+)
+if st.button("刪除勾選圖片", type="primary", use_container_width=False):
+    if selected_delete_ids:
+        for item_id in selected_delete_ids:
+            delete_item(board, item_id)
+        st.success(f"已刪除 {len(selected_delete_ids)} 張圖片。")
+        st.rerun()
+    else:
+        st.info("請先勾選要刪除的圖片。")
 
 if not items:
     st.info("目前沒有符合條件的圖片")
