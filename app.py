@@ -294,11 +294,17 @@ def compress_upload_image(
     max_long_edge: int = COMPRESS_LONG_EDGE_DEFAULT,
     jpeg_quality: int = COMPRESS_JPEG_QUALITY_DEFAULT,
 ) -> tuple[bytes, str]:
-    image = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+    image = Image.open(io.BytesIO(raw_bytes))
+    image = ImageOps.exif_transpose(image).convert("RGB")
     image.thumbnail((max_long_edge, max_long_edge), Image.Resampling.LANCZOS)
     out = io.BytesIO()
     image.save(out, format="JPEG", quality=jpeg_quality, optimize=True)
     return out.getvalue(), "image/jpeg"
+
+
+def load_item_image(item: dict) -> Image.Image:
+    image = Image.open(io.BytesIO(image_bytes_from_item(item)))
+    return ImageOps.exif_transpose(image).convert("RGB")
 
 
 def build_fitted_card(item: dict, card_size: tuple[int, int] = CARD_SIZE) -> Image.Image:
@@ -306,7 +312,7 @@ def build_fitted_card(item: dict, card_size: tuple[int, int] = CARD_SIZE) -> Ima
     Keep original aspect ratio for both landscape and portrait images,
     then center the image on a fixed-size card background.
     """
-    source = Image.open(io.BytesIO(image_bytes_from_item(item))).convert("RGB")
+    source = load_item_image(item)
     fitted = ImageOps.contain(source, card_size, method=Image.Resampling.LANCZOS)
     card = Image.new("RGB", card_size, color=(248, 249, 250))
     offset_x = (card_size[0] - fitted.width) // 2
