@@ -168,34 +168,75 @@ def str_to_date(value: str) -> date | None:
         return None
 
 
+def safe_pdf_text(value: str, unicode_enabled: bool) -> str:
+    text = str(value or "")
+    if unicode_enabled:
+        return text
+    return text.encode("latin-1", errors="replace").decode("latin-1")
+
+
+def try_enable_unicode_font(pdf: FPDF) -> bool:
+    # Common font paths across local/dev/cloud Linux environments.
+    font_candidates = [
+        Path("NotoSansTC-Regular.ttf"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJKtc-Regular.otf"),
+        Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+        Path("/System/Library/Fonts/PingFang.ttc"),
+        Path("C:/Windows/Fonts/msjh.ttc"),
+        Path("C:/Windows/Fonts/msyh.ttc"),
+    ]
+    for font_path in font_candidates:
+        if font_path.exists():
+            pdf.add_font("UnicodeFont", "", str(font_path))
+            pdf.set_font("UnicodeFont", size=12)
+            return True
+    pdf.set_font("Helvetica", size=12)
+    return False
+
+
 def create_pdf_bytes(data: dict) -> bytes:
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=12)
     pdf.add_page()
-    pdf.set_font("Helvetica", size=16)
-    pdf.cell(0, 10, txt=f"HangDaoLa - {data.get('workspace_name', '')}", ln=True)
+    unicode_enabled = try_enable_unicode_font(pdf)
+    pdf.set_font_size(16)
+    pdf.cell(
+        0,
+        10,
+        txt=safe_pdf_text(f"HangDaoLa - {data.get('workspace_name', '')}", unicode_enabled),
+        ln=True,
+    )
     pdf.ln(2)
 
     for tab in data.get("tabs", []):
-        pdf.set_font("Helvetica", style="B", size=13)
-        pdf.multi_cell(0, 8, txt=f"[Tab] {tab.get('name', 'Untitled')}")
+        pdf.set_font(style="B", size=13)
+        pdf.multi_cell(
+            0,
+            8,
+            txt=safe_pdf_text(f"[Tab] {tab.get('name', 'Untitled')}", unicode_enabled),
+        )
         pdf.ln(1)
         for item in tab.get("items", []):
-            pdf.set_font("Helvetica", style="", size=11)
+            pdf.set_font(style="", size=11)
             due_text = item.get("due_date", "")
             tags = ", ".join(item.get("tags", []))
-            pdf.multi_cell(0, 7, txt=f"- {item.get('title', '')}")
+            pdf.multi_cell(0, 7, txt=safe_pdf_text(f"- {item.get('title', '')}", unicode_enabled))
             if due_text:
-                pdf.multi_cell(0, 6, txt=f"  Due: {due_text}")
+                pdf.multi_cell(0, 6, txt=safe_pdf_text(f"  Due: {due_text}", unicode_enabled))
             if tags:
-                pdf.multi_cell(0, 6, txt=f"  Tags: {tags}")
+                pdf.multi_cell(0, 6, txt=safe_pdf_text(f"  Tags: {tags}", unicode_enabled))
             content = item.get("content", "").strip()
             if content:
-                pdf.multi_cell(0, 6, txt=f"  Content: {content}")
+                pdf.multi_cell(0, 6, txt=safe_pdf_text(f"  Content: {content}", unicode_enabled))
             pdf.ln(1)
         pdf.ln(1)
 
-    return bytes(pdf.output(dest="S"))
+    raw = pdf.output(dest="S")
+    if isinstance(raw, (bytes, bytearray)):
+        return bytes(raw)
+    return str(raw).encode("latin-1", errors="replace")
 
 
 def matches_filter(item: dict, search_query: str, selected_tags: list[str], due_before: date | None) -> bool:
