@@ -29,7 +29,64 @@ def create_default_data() -> dict:
     return {"version": 2, "workspace_name": "我的夯到拉", "boards": [create_default_board("分頁 1")]}
 
 
+def migrate_legacy_data(data: dict) -> dict:
+    if not isinstance(data, dict):
+        return create_default_data()
+    if "boards" in data:
+        return data
+
+    # Backward compatibility for old schema: workspace_name + tabs/items.
+    tabs = data.get("tabs", [])
+    if not isinstance(tabs, list) or not tabs:
+        return create_default_data()
+
+    boards = []
+    for i, tab in enumerate(tabs):
+        if not isinstance(tab, dict):
+            continue
+        board = create_default_board(str(tab.get("name", f"分頁 {i + 1}")))
+        board["title"] = f"{board['name']} 排行榜"
+
+        converted_items = []
+        placements: dict[str, list[str]] = {tier: [] for tier in board["tiers"]}
+        for old_item in tab.get("items", []):
+            if not isinstance(old_item, dict):
+                continue
+            # Legacy data may not have image. Create text placeholder card for compatibility.
+            placeholder = Image.new("RGB", CARD_SIZE, color=(250, 250, 250))
+            draw = ImageDraw.Draw(placeholder)
+            draw.text((10, 60), safe_text(old_item.get("title", "項目"))[:10], fill=(50, 50, 50), font=pick_font(16))
+            buf = io.BytesIO()
+            placeholder.save(buf, format="PNG")
+            item_id = str(old_item.get("id") or uuid4())
+            converted_items.append(
+                {
+                    "id": item_id,
+                    "name": str(old_item.get("title", "未命名項目")),
+                    "mime": "image/png",
+                    "image_b64": base64.b64encode(buf.getvalue()).decode("utf-8"),
+                }
+            )
+            # Put migrated legacy items into the middle tier by default.
+            default_tier = board["tiers"][2] if len(board["tiers"]) >= 3 else board["tiers"][0]
+            placements.setdefault(default_tier, []).append(item_id)
+
+        board["items"] = converted_items
+        board["placements"] = placements
+        boards.append(board)
+
+    if not boards:
+        return create_default_data()
+
+    return {
+        "version": 2,
+        "workspace_name": str(data.get("workspace_name", "我的夯到拉")),
+        "boards": boards,
+    }
+
+
 def validate_data(data: dict) -> dict:
+    data = migrate_legacy_data(data)
     if not isinstance(data, dict):
         return create_default_data()
 
@@ -105,6 +162,7 @@ def save_to_disk(data: dict, path: Path) -> None:
 def init_state() -> None:
     if "data" not in st.session_state:
         st.session_state.data = load_from_disk(AUTOSAVE_PATH)
+    st.session_state.data = validate_data(st.session_state.data)
     if "last_saved_snapshot" not in st.session_state:
         st.session_state.last_saved_snapshot = ""
     if "shared_path" not in st.session_state:
