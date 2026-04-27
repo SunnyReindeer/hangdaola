@@ -6,6 +6,10 @@ from uuid import uuid4
 
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
+try:
+    from streamlit_sortables import sort_items
+except Exception:
+    sort_items = None
 
 
 APP_TITLE = "夯到拉 Tier List"
@@ -249,6 +253,36 @@ def move_within_tier(board: dict, tier_name: str, item_id: str, direction: int) 
         ids[idx], ids[target] = ids[target], ids[idx]
 
 
+def compact_and_validate_placements(board: dict) -> None:
+    valid_ids = {item["id"] for item in board["items"]}
+    for tier in board["tiers"]:
+        current = board["placements"].get(tier, [])
+        board["placements"][tier] = [item_id for item_id in current if item_id in valid_ids]
+
+
+def apply_drag_result(board: dict, dragged: list[dict]) -> None:
+    # dragged format from streamlit-sortables:
+    # [{"header":"圖片池","items":[...label...]}, {"header":"夯","items":[...]} ...]
+    label_to_id = {f"{item['name']} ({item['id'][:6]})": item["id"] for item in board["items"]}
+    assigned: set[str] = set()
+    new_placements: dict[str, list[str]] = {tier: [] for tier in board["tiers"]}
+
+    for box in dragged:
+        header = str(box.get("header", ""))
+        labels = box.get("items", [])
+        if not isinstance(labels, list):
+            continue
+        for label in labels:
+            item_id = label_to_id.get(str(label))
+            if not item_id or item_id in assigned:
+                continue
+            assigned.add(item_id)
+            if header in new_placements:
+                new_placements[header].append(item_id)
+
+    board["placements"] = new_placements
+
+
 def image_bytes_from_item(item: dict) -> bytes:
     return base64.b64decode(item["image_b64"])
 
@@ -417,6 +451,7 @@ with st.sidebar:
             st.error("匯入失敗：請確認 JSON 格式")
 
 board = active_board()
+compact_and_validate_placements(board)
 board["title"] = st.text_input("榜單標題", value=board["title"])
 tier_lines = st.text_area("層級設定（每行一個層級）", value="\n".join(board["tiers"]), height=130)
 new_tiers = [line.strip() for line in tier_lines.splitlines() if line.strip()]
@@ -457,50 +492,49 @@ items = board["items"]
 items_by_id = item_map(board)
 filtered_items = [i for i in items if search.lower().strip() in i["name"].lower()]
 
-if not filtered_items:
+if not items:
     st.info("目前沒有符合條件的圖片")
 else:
     cols = st.columns(4)
     for idx, item in enumerate(filtered_items):
-        current_tier = item_tier(board, item["id"])
         with cols[idx % 4]:
             st.image(image_bytes_from_item(item), caption=item["name"], use_container_width=True)
-            target = st.selectbox(
-                "移動到",
-                options=["（圖片池）"] + board["tiers"],
-                index=0 if current_tier is None else (board["tiers"].index(current_tier) + 1),
-                key=f"target_{item['id']}",
-            )
-            if st.button("套用位置", key=f"apply_{item['id']}", use_container_width=True):
-                assign_item_to_tier(board, item["id"], None if target == "（圖片池）" else target)
-                st.rerun()
             if st.button("刪除圖片", key=f"del_{item['id']}", use_container_width=True):
                 delete_item(board, item["id"])
                 st.rerun()
 
 st.subheader("層級榜單")
-for tier in board["tiers"]:
-    st.markdown(f"### {tier}")
-    tier_ids = board["placements"].get(tier, [])
-    if not tier_ids:
-        st.caption("拖放替代：從圖片池選擇目標層級後按「套用位置」。")
-        continue
-    cols = st.columns(5)
-    for idx, item_id in enumerate(tier_ids):
-        item = items_by_id.get(item_id)
-        if not item:
+if sort_items is None:
+    st.warning("未安裝拖放套件：請先 pip install streamlit-sortables")
+else:
+    label_of = lambda i: f"{i['name']} ({i['id'][:6]})"
+    placed_ids = {item_id for tier in board["tiers"] for item_id in board["placements"].get(tier, [])}
+    pool_labels = [label_of(i) for i in board["items"] if i["id"] not in placed_ids]
+    drag_groups = [{"header": "圖片池", "items": pool_labels}] + [
+        {
+            "header": tier,
+            "items": [label_of(items_by_id[item_id]) for item_id in board["placements"].get(tier, []) if item_id in items_by_id],
+        }
+        for tier in board["tiers"]
+    ]
+    dragged = sort_items(drag_groups, multi_containers=True, direction="horizontal")
+    if dragged:
+        apply_drag_result(board, dragged)
+
+    st.caption("可直接拖放：圖片池 <-> 各層級，層內也可拖曳排序。")
+    for tier in board["tiers"]:
+        tier_ids = board["placements"].get(tier, [])
+        st.markdown(f"### {tier}（{len(tier_ids)}）")
+        if not tier_ids:
+            st.caption("目前沒有圖片")
             continue
-        with cols[idx % 5]:
-            st.image(image_bytes_from_item(item), caption=item["name"], use_container_width=True)
-            up_col, down_col = st.columns(2)
-            with up_col:
-                if st.button("左移", key=f"left_{tier}_{item_id}", use_container_width=True):
-                    move_within_tier(board, tier, item_id, -1)
-                    st.rerun()
-            with down_col:
-                if st.button("右移", key=f"right_{tier}_{item_id}", use_container_width=True):
-                    move_within_tier(board, tier, item_id, 1)
-                    st.rerun()
+        cols = st.columns(5)
+        for idx, item_id in enumerate(tier_ids):
+            item = items_by_id.get(item_id)
+            if not item:
+                continue
+            with cols[idx % 5]:
+                st.image(image_bytes_from_item(item), caption=item["name"], use_container_width=True)
 
 autosave_if_needed()
 st.caption(f"目前自動儲存檔：`{get_active_save_path().resolve()}`")
