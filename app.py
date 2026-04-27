@@ -201,35 +201,32 @@ def create_pdf_bytes(data: dict) -> bytes:
     pdf.set_auto_page_break(auto=True, margin=12)
     pdf.add_page()
     unicode_enabled = try_enable_unicode_font(pdf)
+    effective_width = pdf.w - pdf.l_margin - pdf.r_margin
+
+    def write_line(text: str, height: float = 6) -> None:
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(effective_width, height, txt=safe_pdf_text(text, unicode_enabled))
+
     pdf.set_font_size(16)
-    pdf.cell(
-        0,
-        10,
-        txt=safe_pdf_text(f"HangDaoLa - {data.get('workspace_name', '')}", unicode_enabled),
-        ln=True,
-    )
+    write_line(f"HangDaoLa - {data.get('workspace_name', '')}", height=10)
     pdf.ln(2)
 
     for tab in data.get("tabs", []):
         pdf.set_font(style="B", size=13)
-        pdf.multi_cell(
-            0,
-            8,
-            txt=safe_pdf_text(f"[Tab] {tab.get('name', 'Untitled')}", unicode_enabled),
-        )
+        write_line(f"[Tab] {tab.get('name', 'Untitled')}", height=8)
         pdf.ln(1)
         for item in tab.get("items", []):
             pdf.set_font(style="", size=11)
             due_text = item.get("due_date", "")
             tags = ", ".join(item.get("tags", []))
-            pdf.multi_cell(0, 7, txt=safe_pdf_text(f"- {item.get('title', '')}", unicode_enabled))
+            write_line(f"- {item.get('title', '')}", height=7)
             if due_text:
-                pdf.multi_cell(0, 6, txt=safe_pdf_text(f"  Due: {due_text}", unicode_enabled))
+                write_line(f"  Due: {due_text}")
             if tags:
-                pdf.multi_cell(0, 6, txt=safe_pdf_text(f"  Tags: {tags}", unicode_enabled))
+                write_line(f"  Tags: {tags}")
             content = item.get("content", "").strip()
             if content:
-                pdf.multi_cell(0, 6, txt=safe_pdf_text(f"  Content: {content}", unicode_enabled))
+                write_line(f"  Content: {content}")
             pdf.ln(1)
         pdf.ln(1)
 
