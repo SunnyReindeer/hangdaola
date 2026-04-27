@@ -1,92 +1,97 @@
+import base64
 import io
 import json
-from datetime import date
 from pathlib import Path
 from uuid import uuid4
 
 import streamlit as st
-from fpdf import FPDF
+from PIL import Image, ImageDraw, ImageFont
 
 
-APP_TITLE = "夯到拉排程工具"
+APP_TITLE = "夯到拉 Tier List"
 AUTOSAVE_PATH = Path("hangdaola_autosave.json")
+TIER_DEFAULTS = ["夯", "頂級", "人上人", "NPC", "拉"]
+CARD_SIZE = (140, 140)
+
+
+def create_default_board(name: str = "我的榜單") -> dict:
+    return {
+        "id": str(uuid4()),
+        "name": name,
+        "title": "我的夯到拉排行榜",
+        "tiers": TIER_DEFAULTS.copy(),
+        "items": [],
+        "placements": {},
+    }
 
 
 def create_default_data() -> dict:
-    return {
-        "version": 1,
-        "workspace_name": "我的夯到拉",
-        "tabs": [
-            {
-                "id": str(uuid4()),
-                "name": "分頁 1",
-                "items": [
-                    {
-                        "id": str(uuid4()),
-                        "title": "範例項目",
-                        "content": "在這裡輸入內容...",
-                        "due_date": "",
-                        "tags": [],
-                    }
-                ],
-            }
-        ],
-    }
+    return {"version": 2, "workspace_name": "我的夯到拉", "boards": [create_default_board("分頁 1")]}
 
 
 def validate_data(data: dict) -> dict:
     if not isinstance(data, dict):
         return create_default_data()
 
-    tabs = data.get("tabs")
-    if not isinstance(tabs, list) or len(tabs) == 0:
+    boards = data.get("boards")
+    if not isinstance(boards, list) or not boards:
         return create_default_data()
 
-    normalized_tabs = []
-    for tab in tabs:
-        if not isinstance(tab, dict):
+    normalized_boards = []
+    for board in boards:
+        if not isinstance(board, dict):
             continue
-        tab_name = tab.get("name", "未命名分頁")
-        items = tab.get("items", [])
-        if not isinstance(items, list):
-            items = []
-
-        normalized_items = []
-        for item in items:
+        tiers = [str(t).strip() for t in board.get("tiers", []) if str(t).strip()]
+        if not tiers:
+            tiers = TIER_DEFAULTS.copy()
+        items = []
+        for item in board.get("items", []):
             if not isinstance(item, dict):
                 continue
-            normalized_items.append(
+            image_b64 = str(item.get("image_b64", ""))
+            if not image_b64:
+                continue
+            items.append(
                 {
                     "id": str(item.get("id") or uuid4()),
-                    "title": str(item.get("title", "")),
-                    "content": str(item.get("content", "")),
-                    "due_date": str(item.get("due_date", "")),
-                    "tags": [str(tag) for tag in item.get("tags", []) if str(tag).strip()],
+                    "name": str(item.get("name", "未命名圖片")),
+                    "image_b64": image_b64,
+                    "mime": str(item.get("mime", "image/png")),
                 }
             )
+        placements = {}
+        item_ids = {i["id"] for i in items}
+        raw_placements = board.get("placements", {})
+        if isinstance(raw_placements, dict):
+            for tier_name, ids in raw_placements.items():
+                tier_key = str(tier_name)
+                if tier_key in tiers and isinstance(ids, list):
+                    placements[tier_key] = [str(i) for i in ids if str(i) in item_ids]
 
-        normalized_tabs.append(
+        normalized_boards.append(
             {
-                "id": str(tab.get("id") or uuid4()),
-                "name": str(tab_name),
-                "items": normalized_items,
+                "id": str(board.get("id") or uuid4()),
+                "name": str(board.get("name", "未命名分頁")),
+                "title": str(board.get("title", "我的夯到拉排行榜")),
+                "tiers": tiers,
+                "items": items,
+                "placements": placements,
             }
         )
 
-    if not normalized_tabs:
+    if not normalized_boards:
         return create_default_data()
 
     return {
-        "version": int(data.get("version", 1)),
+        "version": int(data.get("version", 2)),
         "workspace_name": str(data.get("workspace_name", "我的夯到拉")),
-        "tabs": normalized_tabs,
+        "boards": normalized_boards,
     }
 
 
 def load_from_disk(path: Path) -> dict:
     if not path.exists():
         return create_default_data()
-
     try:
         return validate_data(json.loads(path.read_text(encoding="utf-8")))
     except Exception:
@@ -104,6 +109,8 @@ def init_state() -> None:
         st.session_state.last_saved_snapshot = ""
     if "shared_path" not in st.session_state:
         st.session_state.shared_path = ""
+    if "board_index" not in st.session_state:
+        st.session_state.board_index = 0
 
 
 def get_active_save_path() -> Path:
@@ -118,158 +125,186 @@ def autosave_if_needed() -> None:
         st.session_state.last_saved_snapshot = snapshot
 
 
-def add_tab() -> None:
-    st.session_state.data["tabs"].append(
-        {"id": str(uuid4()), "name": f"分頁 {len(st.session_state.data['tabs']) + 1}", "items": []}
-    )
+def active_board() -> dict:
+    boards = st.session_state.data["boards"]
+    idx = min(max(int(st.session_state.board_index), 0), len(boards) - 1)
+    st.session_state.board_index = idx
+    return boards[idx]
 
 
-def remove_tab(index: int) -> None:
-    if len(st.session_state.data["tabs"]) <= 1:
+def add_board() -> None:
+    boards = st.session_state.data["boards"]
+    boards.append(create_default_board(f"分頁 {len(boards) + 1}"))
+    st.session_state.board_index = len(boards) - 1
+
+
+def remove_board(idx: int) -> None:
+    boards = st.session_state.data["boards"]
+    if len(boards) <= 1:
         return
-    st.session_state.data["tabs"].pop(index)
+    boards.pop(idx)
+    st.session_state.board_index = max(0, idx - 1)
 
 
-def move_tab(index: int, direction: int) -> None:
-    target = index + direction
-    tabs = st.session_state.data["tabs"]
-    if 0 <= target < len(tabs):
-        tabs[index], tabs[target] = tabs[target], tabs[index]
+def move_board(idx: int, direction: int) -> None:
+    target = idx + direction
+    boards = st.session_state.data["boards"]
+    if 0 <= target < len(boards):
+        boards[idx], boards[target] = boards[target], boards[idx]
+        st.session_state.board_index = target
 
 
-def add_item(tab: dict) -> None:
-    tab["items"].append(
-        {
-            "id": str(uuid4()),
-            "title": "新項目",
-            "content": "",
-            "due_date": "",
-            "tags": [],
-        }
-    )
+def item_map(board: dict) -> dict[str, dict]:
+    return {item["id"]: item for item in board["items"]}
 
 
-def remove_item(tab: dict, item_index: int) -> None:
-    tab["items"].pop(item_index)
+def item_tier(board: dict, item_id: str) -> str | None:
+    for tier, ids in board["placements"].items():
+        if item_id in ids:
+            return tier
+    return None
 
 
-def move_item(tab: dict, item_index: int, direction: int) -> None:
-    target = item_index + direction
-    if 0 <= target < len(tab["items"]):
-        tab["items"][item_index], tab["items"][target] = tab["items"][target], tab["items"][item_index]
+def assign_item_to_tier(board: dict, item_id: str, tier_name: str | None) -> None:
+    for ids in board["placements"].values():
+        if item_id in ids:
+            ids.remove(item_id)
+    if tier_name:
+        board["placements"].setdefault(tier_name, [])
+        board["placements"][tier_name].append(item_id)
 
 
-def str_to_date(value: str) -> date | None:
-    if not value:
-        return None
-    try:
-        return date.fromisoformat(value)
-    except ValueError:
-        return None
+def delete_item(board: dict, item_id: str) -> None:
+    board["items"] = [item for item in board["items"] if item["id"] != item_id]
+    for ids in board["placements"].values():
+        if item_id in ids:
+            ids.remove(item_id)
 
 
-def safe_pdf_text(value: str, unicode_enabled: bool) -> str:
-    text = str(value or "")
-    if unicode_enabled:
-        return text
-    return text.encode("latin-1", errors="replace").decode("latin-1")
+def move_within_tier(board: dict, tier_name: str, item_id: str, direction: int) -> None:
+    ids = board["placements"].get(tier_name, [])
+    if item_id not in ids:
+        return
+    idx = ids.index(item_id)
+    target = idx + direction
+    if 0 <= target < len(ids):
+        ids[idx], ids[target] = ids[target], ids[idx]
 
 
-def try_enable_unicode_font(pdf: FPDF) -> bool:
-    # Common font paths across local/dev/cloud Linux environments.
+def image_bytes_from_item(item: dict) -> bytes:
+    return base64.b64decode(item["image_b64"])
+
+
+def safe_text(value: str) -> str:
+    return str(value or "").strip()
+
+
+def pick_font(size: int = 18) -> ImageFont.ImageFont:
     font_candidates = [
-        Path("NotoSansTC-Regular.ttf"),
-        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
-        Path("/usr/share/fonts/opentype/noto/NotoSansCJKtc-Regular.otf"),
-        Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
-        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
-        Path("/System/Library/Fonts/PingFang.ttc"),
-        Path("C:/Windows/Fonts/msjh.ttc"),
-        Path("C:/Windows/Fonts/msyh.ttc"),
+        "C:/Windows/Fonts/msjh.ttc",
+        "C:/Windows/Fonts/msyh.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     ]
-    for font_path in font_candidates:
-        if font_path.exists():
-            pdf.add_font("UnicodeFont", "", str(font_path))
-            pdf.set_font("UnicodeFont", size=12)
-            return True
-    pdf.set_font("Helvetica", size=12)
-    return False
+    for path in font_candidates:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
 
 
-def create_pdf_bytes(data: dict) -> bytes:
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=12)
-    pdf.add_page()
-    unicode_enabled = try_enable_unicode_font(pdf)
-    effective_width = pdf.w - pdf.l_margin - pdf.r_margin
+def render_board_png(board: dict) -> bytes:
+    label_w = 160
+    gap = 10
+    row_h = CARD_SIZE[1] + 24
+    tiers = board["tiers"]
+    placements = board["placements"]
+    max_items = max([len(placements.get(t, [])) for t in tiers] + [1])
+    canvas_w = label_w + gap + (CARD_SIZE[0] + gap) * max_items + 20
+    canvas_h = 90 + (row_h + gap) * len(tiers) + 30
 
-    def write_line(text: str, height: float = 6) -> None:
-        pdf.set_x(pdf.l_margin)
-        pdf.multi_cell(effective_width, height, txt=safe_pdf_text(text, unicode_enabled))
+    canvas = Image.new("RGB", (canvas_w, canvas_h), color=(245, 247, 250))
+    draw = ImageDraw.Draw(canvas)
+    title_font = pick_font(30)
+    label_font = pick_font(22)
+    small_font = pick_font(16)
+    draw.text((18, 16), safe_text(board["title"]), fill=(33, 37, 41), font=title_font)
 
-    pdf.set_font_size(16)
-    write_line(f"HangDaoLa - {data.get('workspace_name', '')}", height=10)
-    pdf.ln(2)
+    items_by_id = item_map(board)
+    y = 74
+    tier_colors = [(255, 97, 97), (255, 153, 51), (255, 211, 77), (143, 212, 98), (126, 174, 255)]
 
-    for tab in data.get("tabs", []):
-        pdf.set_font(style="B", size=13)
-        write_line(f"[Tab] {tab.get('name', 'Untitled')}", height=8)
-        pdf.ln(1)
-        for item in tab.get("items", []):
-            pdf.set_font(style="", size=11)
-            due_text = item.get("due_date", "")
-            tags = ", ".join(item.get("tags", []))
-            write_line(f"- {item.get('title', '')}", height=7)
-            if due_text:
-                write_line(f"  Due: {due_text}")
-            if tags:
-                write_line(f"  Tags: {tags}")
-            content = item.get("content", "").strip()
-            if content:
-                write_line(f"  Content: {content}")
-            pdf.ln(1)
-        pdf.ln(1)
+    for i, tier in enumerate(tiers):
+        color = tier_colors[i % len(tier_colors)]
+        draw.rounded_rectangle((10, y, label_w - 5, y + row_h), radius=10, fill=color)
+        draw.text((20, y + 12), safe_text(tier), fill=(20, 20, 20), font=label_font)
+        draw.rounded_rectangle((label_w, y, canvas_w - 12, y + row_h), radius=10, fill=(255, 255, 255))
 
-    raw = pdf.output(dest="S")
-    if isinstance(raw, (bytes, bytearray)):
-        return bytes(raw)
-    return str(raw).encode("latin-1", errors="replace")
+        x = label_w + 8
+        for item_id in placements.get(tier, []):
+            item = items_by_id.get(item_id)
+            if not item:
+                continue
+            try:
+                img = Image.open(io.BytesIO(image_bytes_from_item(item))).convert("RGB")
+                img.thumbnail(CARD_SIZE)
+                tile = Image.new("RGB", CARD_SIZE, color=(248, 249, 250))
+                offset_x = (CARD_SIZE[0] - img.width) // 2
+                offset_y = (CARD_SIZE[1] - img.height) // 2
+                tile.paste(img, (offset_x, offset_y))
+                canvas.paste(tile, (x, y + 10))
+                draw.rectangle((x, y + 10, x + CARD_SIZE[0], y + 10 + CARD_SIZE[1]), outline=(200, 200, 200))
+                draw.text((x + 4, y + CARD_SIZE[1] - 4), safe_text(item["name"])[:12], fill=(50, 50, 50), font=small_font)
+                x += CARD_SIZE[0] + gap
+            except Exception:
+                continue
+        y += row_h + gap
 
-
-def matches_filter(item: dict, search_query: str, selected_tags: list[str], due_before: date | None) -> bool:
-    haystack = f"{item.get('title', '')}\n{item.get('content', '')}\n{' '.join(item.get('tags', []))}".lower()
-    if search_query and search_query not in haystack:
-        return False
-    if selected_tags and not set(selected_tags).issubset(set(item.get("tags", []))):
-        return False
-    if due_before:
-        due_date = str_to_date(item.get("due_date", ""))
-        if due_date is None or due_date > due_before:
-            return False
-    return True
+    output = io.BytesIO()
+    canvas.save(output, format="PNG")
+    return output.getvalue()
 
 
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 init_state()
 
 st.title(APP_TITLE)
-st.caption("支援多分頁、本機暫存、多人共用檔案、搜尋/標籤、JSON/PDF 匯出。")
+st.caption("參考層級排行榜互動：分頁管理、圖片池、分配到層級、JSON/PNG 匯出。")
 
 with st.sidebar:
-    st.subheader("工作區設定")
+    st.subheader("工作區")
     st.session_state.data["workspace_name"] = st.text_input(
-        "工作區名稱", value=st.session_state.data.get("workspace_name", "我的夯到拉")
+        "工作區名稱",
+        value=st.session_state.data.get("workspace_name", "我的夯到拉"),
     )
+    board_names = [b.get("name", "未命名分頁") for b in st.session_state.data["boards"]]
+    st.session_state.board_index = st.selectbox(
+        "目前分頁",
+        options=list(range(len(board_names))),
+        format_func=lambda i: board_names[i],
+        index=min(st.session_state.board_index, len(board_names) - 1),
+    )
+    b = active_board()
+    b["name"] = st.text_input("分頁名稱", value=b["name"])
 
-    col_a, col_b = st.columns(2)
-    with col_a:
+    col_b1, col_b2, col_b3 = st.columns(3)
+    with col_b1:
         if st.button("新增分頁", use_container_width=True):
-            add_tab()
+            add_board()
             st.rerun()
-    with col_b:
-        if st.button("手動儲存", use_container_width=True):
-            save_to_disk(st.session_state.data, get_active_save_path())
-            st.success("已儲存到本地檔案。")
+    with col_b2:
+        if st.button("上移", use_container_width=True):
+            move_board(st.session_state.board_index, -1)
+            st.rerun()
+    with col_b3:
+        if st.button("下移", use_container_width=True):
+            move_board(st.session_state.board_index, 1)
+            st.rerun()
+
+    if st.button("刪除目前分頁", use_container_width=True):
+        remove_board(st.session_state.board_index)
+        st.rerun()
 
     st.divider()
     st.subheader("多人共用（共享檔案）")
@@ -281,160 +316,133 @@ with st.sidebar:
     col_sync_a, col_sync_b = st.columns(2)
     with col_sync_a:
         if st.button("載入共享檔", use_container_width=True):
-            shared = str(st.session_state.shared_path).strip()
-            if not shared:
-                st.warning("請先輸入共享檔路徑。")
-            else:
-                loaded = load_from_disk(Path(shared))
-                st.session_state.data = loaded
+            shared = safe_text(st.session_state.shared_path)
+            if shared:
+                st.session_state.data = load_from_disk(Path(shared))
                 save_to_disk(st.session_state.data, Path(shared))
-                st.success("已載入共享檔。")
+                st.success("已載入共享檔")
                 st.rerun()
+            st.warning("請先輸入共享檔路徑")
     with col_sync_b:
         if st.button("同步到共享檔", use_container_width=True):
-            shared = str(st.session_state.shared_path).strip()
-            if not shared:
-                st.warning("請先輸入共享檔路徑。")
-            else:
+            shared = safe_text(st.session_state.shared_path)
+            if shared:
                 save_to_disk(st.session_state.data, Path(shared))
-                st.success("已同步到共享檔。")
+                st.success("已同步到共享檔")
+            else:
+                st.warning("請先輸入共享檔路徑")
 
     st.divider()
-    st.subheader("資料匯出 / 匯入")
-
-    export_payload = json.dumps(st.session_state.data, ensure_ascii=False, indent=2)
+    st.subheader("匯入 / 匯出")
+    export_payload = json.dumps(st.session_state.data, ensure_ascii=False, indent=2).encode("utf-8")
     st.download_button(
         "Export JSON",
-        data=export_payload.encode("utf-8"),
+        data=export_payload,
         file_name=f"{st.session_state.data['workspace_name']}.json",
         mime="application/json",
         use_container_width=True,
     )
     st.download_button(
-        "Export PDF",
-        data=create_pdf_bytes(st.session_state.data),
-        file_name=f"{st.session_state.data['workspace_name']}.pdf",
-        mime="application/pdf",
+        "Export PNG 榜單圖",
+        data=render_board_png(active_board()),
+        file_name=f"{active_board()['name']}.png",
+        mime="image/png",
         use_container_width=True,
     )
-
     uploaded = st.file_uploader("Import JSON", type=["json"])
     if uploaded is not None:
         try:
-            imported = validate_data(json.load(uploaded))
-            st.session_state.data = imported
-            save_to_disk(st.session_state.data, AUTOSAVE_PATH)
-            st.success("匯入成功，已還原你的夯到拉列表。")
+            st.session_state.data = validate_data(json.load(uploaded))
+            st.success("匯入成功")
             st.rerun()
         except Exception:
-            st.error("匯入失敗：請確認檔案格式是否正確。")
+            st.error("匯入失敗：請確認 JSON 格式")
 
-all_tags = sorted(
-    {tag for tab in st.session_state.data["tabs"] for item in tab["items"] for tag in item.get("tags", [])}
+board = active_board()
+board["title"] = st.text_input("榜單標題", value=board["title"])
+tier_lines = st.text_area("層級設定（每行一個層級）", value="\n".join(board["tiers"]), height=130)
+new_tiers = [line.strip() for line in tier_lines.splitlines() if line.strip()]
+if new_tiers:
+    old_tiers = board["tiers"]
+    board["tiers"] = new_tiers
+    for tier in old_tiers:
+        if tier not in new_tiers:
+            for item_id in board["placements"].get(tier, []):
+                assign_item_to_tier(board, item_id, None)
+            board["placements"].pop(tier, None)
+    for tier in new_tiers:
+        board["placements"].setdefault(tier, [])
+
+st.subheader("圖片池")
+uploaded_images = st.file_uploader(
+    "新增圖片（可多選）",
+    type=["png", "jpg", "jpeg", "webp"],
+    accept_multiple_files=True,
 )
-filter_col_a, filter_col_b, filter_col_c = st.columns([2, 2, 2])
-with filter_col_a:
-    search_keyword = st.text_input("全域搜尋", placeholder="標題 / 內容 / 標籤")
-with filter_col_b:
-    selected_tags = st.multiselect("標籤篩選（需全部符合）", options=all_tags)
-with filter_col_c:
-    due_before = st.date_input("到期日（含）", value=None, format="YYYY-MM-DD")
+if uploaded_images:
+    existing_names = {item["name"] for item in board["items"]}
+    for file in uploaded_images:
+        if file.name in existing_names:
+            continue
+        board["items"].append(
+            {
+                "id": str(uuid4()),
+                "name": file.name,
+                "mime": file.type or "image/png",
+                "image_b64": base64.b64encode(file.getvalue()).decode("utf-8"),
+            }
+        )
+    st.success(f"已新增 {len(uploaded_images)} 張圖片")
 
-tabs = st.session_state.data["tabs"]
-streamlit_tabs = st.tabs([tab["name"] for tab in tabs])
+search = st.text_input("搜尋圖片名稱", placeholder="輸入關鍵字")
+items = board["items"]
+items_by_id = item_map(board)
+filtered_items = [i for i in items if search.lower().strip() in i["name"].lower()]
 
-for idx, (tab_ui, tab_data) in enumerate(zip(streamlit_tabs, tabs)):
-    with tab_ui:
-        header_col, order_col, delete_col = st.columns([3, 2, 1])
-        with header_col:
-            tab_data["name"] = st.text_input(
-                "分頁名稱",
-                value=tab_data["name"],
-                key=f"tab_name_{tab_data['id']}",
+if not filtered_items:
+    st.info("目前沒有符合條件的圖片")
+else:
+    cols = st.columns(4)
+    for idx, item in enumerate(filtered_items):
+        current_tier = item_tier(board, item["id"])
+        with cols[idx % 4]:
+            st.image(image_bytes_from_item(item), caption=item["name"], use_container_width=True)
+            target = st.selectbox(
+                "移動到",
+                options=["（圖片池）"] + board["tiers"],
+                index=0 if current_tier is None else (board["tiers"].index(current_tier) + 1),
+                key=f"target_{item['id']}",
             )
-        with order_col:
-            up_col, down_col = st.columns(2)
-            with up_col:
-                if st.button("分頁上移", key=f"tab_up_{tab_data['id']}", use_container_width=True):
-                    move_tab(idx, -1)
-                    st.rerun()
-            with down_col:
-                if st.button("分頁下移", key=f"tab_down_{tab_data['id']}", use_container_width=True):
-                    move_tab(idx, 1)
-                    st.rerun()
-        with delete_col:
-            st.write("")
-            st.write("")
-            if st.button("刪除分頁", key=f"delete_tab_{tab_data['id']}"):
-                remove_tab(idx)
+            if st.button("套用位置", key=f"apply_{item['id']}", use_container_width=True):
+                assign_item_to_tier(board, item["id"], None if target == "（圖片池）" else target)
+                st.rerun()
+            if st.button("刪除圖片", key=f"del_{item['id']}", use_container_width=True):
+                delete_item(board, item["id"])
                 st.rerun()
 
-        st.write(f"### {tab_data['name']} - 項目列表")
-        if st.button("新增項目", key=f"add_item_{tab_data['id']}"):
-            add_item(tab_data)
-            st.rerun()
-
-        if not tab_data["items"]:
-            st.info("這個分頁還沒有項目，先新增一筆吧。")
-
-        has_any_match = False
-        for item_index, item in enumerate(tab_data["items"]):
-            if not matches_filter(item, search_keyword.lower().strip(), selected_tags, due_before):
-                continue
-            has_any_match = True
-            st.markdown("---")
-            row_a, row_b, row_c = st.columns([3, 2, 1])
-            with row_a:
-                tab_data["items"][item_index]["title"] = st.text_input(
-                    f"標題 {item_index + 1}",
-                    value=item["title"],
-                    key=f"title_{tab_data['id']}_{item['id']}",
-                )
-            with row_b:
-                up_col, down_col = st.columns(2)
-                with up_col:
-                    if st.button("上移", key=f"item_up_{tab_data['id']}_{item['id']}", use_container_width=True):
-                        move_item(tab_data, item_index, -1)
-                        st.rerun()
-                with down_col:
-                    if st.button("下移", key=f"item_down_{tab_data['id']}_{item['id']}", use_container_width=True):
-                        move_item(tab_data, item_index, 1)
-                        st.rerun()
-            with row_c:
-                if st.button("刪除", key=f"del_item_{tab_data['id']}_{item['id']}", use_container_width=True):
-                    remove_item(tab_data, item_index)
+st.subheader("層級榜單")
+for tier in board["tiers"]:
+    st.markdown(f"### {tier}")
+    tier_ids = board["placements"].get(tier, [])
+    if not tier_ids:
+        st.caption("拖放替代：從圖片池選擇目標層級後按「套用位置」。")
+        continue
+    cols = st.columns(5)
+    for idx, item_id in enumerate(tier_ids):
+        item = items_by_id.get(item_id)
+        if not item:
+            continue
+        with cols[idx % 5]:
+            st.image(image_bytes_from_item(item), caption=item["name"], use_container_width=True)
+            up_col, down_col = st.columns(2)
+            with up_col:
+                if st.button("左移", key=f"left_{tier}_{item_id}", use_container_width=True):
+                    move_within_tier(board, tier, item_id, -1)
                     st.rerun()
-
-            date_col, tag_col = st.columns([1, 2])
-            with date_col:
-                parsed_due = str_to_date(item.get("due_date", ""))
-                chosen_date = st.date_input(
-                    f"到期日 {item_index + 1}",
-                    value=parsed_due,
-                    key=f"due_{tab_data['id']}_{item['id']}",
-                    format="YYYY-MM-DD",
-                )
-                tab_data["items"][item_index]["due_date"] = (
-                    chosen_date.isoformat() if chosen_date else ""
-                )
-            with tag_col:
-                tags_raw = st.text_input(
-                    f"標籤 {item_index + 1}（用逗號分隔）",
-                    value=",".join(item.get("tags", [])),
-                    key=f"tags_{tab_data['id']}_{item['id']}",
-                )
-                tab_data["items"][item_index]["tags"] = [
-                    tag.strip() for tag in tags_raw.split(",") if tag.strip()
-                ]
-
-            tab_data["items"][item_index]["content"] = st.text_area(
-                f"內容 {item_index + 1}",
-                value=item["content"],
-                key=f"content_{tab_data['id']}_{item['id']}",
-                height=160,
-            )
-        if tab_data["items"] and not has_any_match:
-            st.info("這個分頁沒有符合篩選條件的項目。")
+            with down_col:
+                if st.button("右移", key=f"right_{tier}_{item_id}", use_container_width=True):
+                    move_within_tier(board, tier, item_id, 1)
+                    st.rerun()
 
 autosave_if_needed()
 st.caption(f"目前自動儲存檔：`{get_active_save_path().resolve()}`")
